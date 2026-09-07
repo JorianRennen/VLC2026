@@ -5,7 +5,7 @@ CRC16 crc;
 
 #define SLEEP 1
 
-// #define TX
+#define TX
 
 /*
  * The VLC receiver is equipped with an OPT101 photodiode. 
@@ -133,7 +133,7 @@ void loop() {
   // britnessR = (britnessR == 0 ? 255 : 0);
   Serial.println();
   analogWrite(ledR, 255);
-  delay(500); // TX frequency:  1s/400ms = 2.5 Hz
+  delay(4); // TX frequency:  1s/400ms = 2.5 Hz
 }
 
 #else
