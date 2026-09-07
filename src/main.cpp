@@ -3,6 +3,8 @@
 
 CRC16 crc;
 
+#define SLEEP 1
+
 // #define TX
 
 /*
@@ -48,14 +50,14 @@ int britnessB = 255; // Default: lowest brightness
 void send_bit(int bit) {
   if (bit == 0) {
     analogWrite(ledR, 0);
-    delay(100); // TX frequency:  1s/400ms = 2.5 Hz
+    delay(SLEEP); // TX frequency:  1s/400ms = 2.5 Hz
     analogWrite(ledR, 255);
-    delay(100); // TX frequency:  1s/400ms = 2.5 Hz
+    delay(SLEEP); // TX frequency:  1s/400ms = 2.5 Hz
   } else {
     analogWrite(ledR, 255);
-    delay(100); // TX frequency:  1s/400ms = 2.5 Hz
+    delay(SLEEP); // TX frequency:  1s/400ms = 2.5 Hz
     analogWrite(ledR, 0); 
-    delay(100); // TX frequency:  1s/400ms = 2.5 Hz
+    delay(SLEEP); // TX frequency:  1s/400ms = 2.5 Hz
   }
 }
 
@@ -111,7 +113,7 @@ void loop() {
   frame[3 + payload_len]     = (checksum >> 8) & 0xFF;
   frame[3 + payload_len + 1] = checksum & 0xFF;
 
-  for (int i = 0; i < sizeof(frame) - 1; i++) {
+  for (int i = 0; i < sizeof(frame); i++) {
     char c = frame[i];
     // Serial.print(">char:");
     // Serial.println(c);
@@ -130,6 +132,7 @@ void loop() {
   // analogWrite(ledR, britnessR);
   // britnessR = (britnessR == 0 ? 255 : 0);
   Serial.println();
+  analogWrite(ledR, 255);
   delay(500); // TX frequency:  1s/400ms = 2.5 Hz
 }
 
@@ -156,6 +159,7 @@ void loop() {
   uint8_t buffer_index = 0;
   uint16_t last_value = 0;
   uint16_t payload_len = 0;
+  size_t total_frame_len = 0;
   char rec_payload[256]; // Assuming a maximum payload length of 256 bytes
   uint8_t rec_payload_index = 0;
 
@@ -205,72 +209,89 @@ void loop() {
 
     char c = 0;
 
-    if (buffer_index >= 16 && memcmp(&buffer[buffer_index - 16], preamble, 16) == 0) {
-      buffer_index = 0;
-      frame_stage = 1;
-      Serial.println();
-      Serial.println("Detected preamble: 0xAAAA");
-    }
-    else if (buffer_index % 8 == 0 && frame_stage == 1 && buffer_index != 0) {
-      Serial.print("Received length: ");
-      for (int i = 0; i < 8; i++) {
-        payload_len = (payload_len << 1) | (buffer[buffer_index - 8 + i]);
-      }
-      Serial.println(payload_len, DEC);
-      buffer_index = 0;
-      frame_stage = 2;
-    }
-    else if (buffer_index % 8 == 0 && frame_stage == 2 && buffer_index != 0) {
-      for (int i = 0; i < 8; i++) {
-        c = (c << 1) | (buffer[buffer_index - 8 + i] & 0x01);
-      }
-      // Serial.print(">char:");
-      if (last_value == 2) {
-        Serial.print(c);
-        rec_payload[rec_payload_index] = c;
-        rec_payload_index++;
-        payload_len--;
-        if (payload_len == 0) {
-          frame_stage = 3;
+    if (frame_stage == 0) {
+      if (buffer_index >= 16) {
+        if (memcmp(&buffer[buffer_index - 16], preamble, 16) == 0) {
           buffer_index = 0;
+          frame_stage = 1;
+          Serial.println("\nDetected preamble: 0xAAAA");
+        } else {
+          // Keep only the most recent 15 bits, leaving room for the next sample
+          memmove(buffer, &buffer[1], 15);
+          buffer_index = 15;
         }
       }
     }
-    else if (buffer_index % 16 == 0 && frame_stage == 3 && buffer_index != 0) {
-      size_t total_frame_len = 2 + 1 + payload_len + 2;
+    else if (buffer_index == 8 && frame_stage == 1) {
+      payload_len = 0;
+      for (int i = 0; i < 8; i++) {
+        payload_len = (payload_len << 1) | (buffer[i] & 0x01);
+      }
+
+      // Reject frames claiming lengths outside your protocol bounds
+      if (payload_len == 0 || payload_len > 64) { 
+        frame_stage = 0;
+        buffer_index = 0;
+      } else {
+        Serial.print("Received length: ");
+        Serial.println(payload_len, DEC);
+        buffer_index = 0;
+        rec_payload_index = 0;
+        frame_stage = 2;
+      }
+    }
+    else if (buffer_index == 8 && frame_stage == 2) {
+      for (int i = 0; i < 8; i++) {
+        c = (c << 1) | (buffer[i] & 0x01);
+      }
+      Serial.print(c);
+      rec_payload[rec_payload_index++] = c;
+      buffer_index = 0;
+      payload_len--;
+
+      if (payload_len == 0) {
+        frame_stage = 3;
+      }
+    }
+    else if (buffer_index == 16 && frame_stage == 3) {
+      payload_len = rec_payload_index;
+      total_frame_len = 2 + 1 + payload_len + 2;
+
       uint8_t frame[total_frame_len];
-      // 1. Pack Preamble (Big-Endian: 0xAAAA)
       frame[0] = 0xAA;
       frame[1] = 0xAA;
-
-      // 2. Pack Length
       frame[2] = payload_len;
-
-      // 3. Pack Payload
       memcpy(&frame[3], rec_payload, payload_len);
 
       crc.reset();
       crc.setPolynome(0x1021);
-      crc.add(&frame[2], 1 + payload_len); // Includes length and payload bytes
+      crc.add(&frame[2], 1 + payload_len);
       uint16_t checksum = crc.calc();
+
       uint16_t val = 0;
       for (int i = 0; i < 16; i++) {
-        val = (val << 1) | (buffer[buffer_index - 16 + i] & 0x01);
+        val = (val << 1) | (buffer[i] & 0x01);
       }
-      Serial.print("Received checksum: ");
+
+      Serial.println();
+      Serial.print("Received checksum: 0x");
       Serial.println(val, HEX);
-      printf("CRC Data (%zu bytes): ", 1 + payload_len);
-      for (size_t i = 0; i < 1 + payload_len; i++) {
-          printf("%02X ", frame[2 + i]);
-      }
-      printf("\n");
-      Serial.print("Calculated checksum: ");
+      Serial.print("Calculated checksum: 0x");
       Serial.println(checksum, HEX);
+
       if (val == checksum) {
         Serial.println("CRC Passed!");
+      } else {
+        Serial.println("CRC Mismatch!");
       }
+
+      // Reset state machine for next frame
+      buffer_index = 0;
+      rec_payload_index = 0;
+      frame_stage = 0;
+      memset(buffer, 0, sizeof(buffer));
     }
-    delay(100); // two times per second
+    delay(SLEEP); // two times per second
   }
 }
 
